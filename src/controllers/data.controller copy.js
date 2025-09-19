@@ -3,7 +3,7 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
 import { fetchOpenMeteo } from "../utils/openMeteo.js";
 import { fetchSoilData } from "../utils/soilGrids.js";
-import { fetchMarketPrices } from "../utils/marketPrices.js";
+import { fetchMarketPrices} from "../utils/marketPrices.js"
 
 const getCropPredictionData = asyncHandler(async (req, res) => {
     const { lat, lon } = req.query;
@@ -110,76 +110,66 @@ const getCropPredictionData = asyncHandler(async (req, res) => {
         }
 
         // Prepare data for AI model
-        const processedData = {
-            N: Number(averageNitrogen.toFixed(1)),   // nitrogen value
-            temperature: Number(temperature.toFixed(1)), // °C
-            humidity: Number(humidity.toFixed(1)),   // %
-            ph: Number(phMean.toFixed(1)),           // soil pH
-            rainfall: Number(rainfall.toFixed(1))    // mm
-        };
+      const processedData = {
+  N: Number(averageNitrogen.toFixed(1)),   // nitrogen value
+  temperature: Number(temperature.toFixed(1)), // °C
+  humidity: Number(humidity.toFixed(1)),   // %
+  ph: Number(phMean.toFixed(1)),           // soil pH
+  rainfall: Number(rainfall.toFixed(1))    // mm
+};
 
-        console.log("Processed Data for AI Model:", processedData);
+console.log("Processed Data for AI Model:", processedData);
+
+
+console.log("Processed Data for AI Model:", processedData);
+      
+        // Check if we have all required data
+        const missingData = Object.entries(processedData)
+            .filter(([key, value]) => value === null || value === undefined)
+            .map(([key]) => key);
+            
+        if (missingData.length > 0) {
+            console.warn("Missing data fields:", missingData);
+            throw new ApiError(500, `Missing critical data: ${missingData.join(", ")}`);
+        }
+
+        const aiModelUrl = "https://sih-crop-prediction-model-1.onrender.com/predict/crop";
 
         try {
-            // Check if we have all required data
-            const missingData = Object.entries(processedData)
-                .filter(([key, value]) => value === null || value === undefined)
-                .map(([key]) => key);
-                
-            if (missingData.length > 0) {
-                console.warn("Missing data fields:", missingData);
-                throw new ApiError(500, `Missing critical data: ${missingData.join(", ")}`);
+            const aiResponse = await fetch(aiModelUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(processedData),
+                timeout: 10000 // 10 second timeout
+            });
+
+            if (!aiResponse.ok) {
+                throw new ApiError(aiResponse.status, `AI model API error: ${aiResponse.statusText}`);
             }
 
-            const aiModelUrl = "https://sih-crop-prediction-model-1.onrender.com/predict/crop";
+            const prediction = await aiResponse.json();
 
-            try {
-                const aiResponse = await fetch(aiModelUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(processedData),
-                    timeout: 10000 // 10 second timeout
-                });
-
-                if (!aiResponse.ok) {
-                    throw new ApiError(aiResponse.status, `AI model API error: ${aiResponse.statusText}`);
-                }
-
-                const prediction = await aiResponse.json();
-
-                if (prediction) {
-                    return res
-                        .status(200)
-                        .json(new ApiResponse(200, { 
-                            inputData: processedData, 
-                            prediction
-                        }, "Data sent to AI model and prediction received successfully."));
-                } else {
-                    return res.json({
-                        inputData: processedData,
-                        prediction: ["Wheat", "Maize", "Rice"]
-                    });
-                }
-
-            } catch (error) {
-                if (error.name === 'AbortError') {
-                    throw new ApiError(504, "AI model request timeout");
-                }
-                throw new ApiError(500, `Failed to get prediction from AI model: ${error.message}`);
-            }
+            return res
+                .status(200)
+                .json(new ApiResponse(200, { 
+                    inputData: processedData, 
+                    prediction 
+                }, "Data sent to AI model and prediction received successfully."));
 
         } catch (error) {
-            // Handle errors from the main try block (API fetch failures)
-            if (error instanceof ApiError) {
-                throw error;
+            if (error.name === 'AbortError') {
+                throw new ApiError(504, "AI model request timeout");
             }
-            throw new ApiError(500, `Failed to fetch external data: ${error.message}`);
+            throw new ApiError(500, `Failed to get prediction from AI model: ${error.message}`);
         }
+
     } catch (error) {
+        // Handle errors from the main try block (API fetch failures)
         if (error instanceof ApiError) {
             throw error;
+
         }
         throw new ApiError(500, `Failed to fetch external data: ${error.message}`);
     }
@@ -199,84 +189,81 @@ const getSeason = () => {
 };
 
 const getCropYieldPrediction = asyncHandler(async (req, res) => {
-    const { lat, lon } = req.query;
-    const { crop, state, fertilizer, area } = req.body;
+    // Get coordinates from URL parameters
+   const { lat, lon } = req.query;
+
     
-    // Validation
-    if (!lat || !lon || !crop || !state || fertilizer === undefined || area === undefined) {
+    // Get crop, state, fertilizer, and area from request body
+    const { crop, state, fertilizer, area } = req.body;
+
+    if (!lat || !lon || !crop || !state || !fertilizer || !area) {
         throw new ApiError(400, "Latitude, Longitude, crop, state, fertilizer, and area are required.");
     }
-    
+
+    // Validate coordinates
     const latNum = parseFloat(lat);
     const lonNum = parseFloat(lon);
     if (isNaN(latNum) || isNaN(lonNum) || latNum < -90 || latNum > 90 || lonNum < -180 || lonNum > 180) {
         throw new ApiError(400, "Invalid latitude or longitude values.");
     }
     
+    // Validate fertilizer
     const fertilizerNum = parseFloat(fertilizer);
     if (isNaN(fertilizerNum) || fertilizerNum < 0) {
         throw new ApiError(400, "Invalid fertilizer value.");
     }
     
+    // Validate area
     const areaNum = parseFloat(area);
     if (isNaN(areaNum) || areaNum <= 0) {
         throw new ApiError(400, "Invalid area value. Area must be a positive number.");
     }
-    
-    // Weather data fetching
-    let annual_rainfall;
-    try {
-        const weatherData = await fetchOpenMeteo(latNum, lonNum);
-        if (weatherData.daily && weatherData.daily.precipitation_sum && weatherData.daily.precipitation_sum.length > 0) {
-            annual_rainfall = weatherData.daily.precipitation_sum.reduce((sum, val) => sum + (val || 0), 0);
-        } else {
-            // Fallback if API fails or returns no data
-            console.warn("Could not fetch valid annual rainfall data; using a default value.");
-            annual_rainfall = 1200; // A reasonable default for many parts of India
-        }
-    } catch (weatherError) {
-        console.error("Error fetching weather data:", weatherError);
-        console.warn("Falling back to default rainfall value due to weather API error.");
-        annual_rainfall = 1200; // Fallback on error
-    }
-    
+
     const season = getSeason();
     const year = new Date().getFullYear();
+    
+    // Fetch rainfall data from OpenMeteo
+    const weatherData = await fetchOpenMeteo(latNum, lonNum);
+    let annual_rainfall = 0;
+    if (weatherData.daily && weatherData.daily.precipitation_sum) {
+        // Sum up precipitation for the entire year
+        annual_rainfall = weatherData.daily.precipitation_sum.reduce((sum, val) => sum + val, 0);
+    }
+    if (annual_rainfall === 0) {
+      console.warn("Could not fetch valid annual rainfall data; using a default value.");
+      annual_rainfall = 1200; // Using a default value as a fallback
+    }
+
     const aiModelUrl = "https://sih-crop-prediction-model-1.onrender.com/predict/yield";
     
     const processedData = {
-        crop: crop.toLowerCase(),
+        crop: crop,
         crop_year: year,
-        season: season.toLowerCase(),
-        state: state.toLowerCase(),
+        season: season,
+        state: state,
         area: areaNum,
         annual_rainfall: annual_rainfall,
         fertilizer: fertilizerNum
     };
     
     try {
-        console.log("Sending data to yield prediction model:", processedData);
-        
         const aiResponse = await fetch(aiModelUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(processedData)
         });
-        
+
         if (!aiResponse.ok) {
-            const errorBody = await aiResponse.text();
-            console.error("AI Model Error Response:", errorBody);
-            throw new ApiError(aiResponse.status, `AI model API error: ${aiResponse.statusText} - ${errorBody}`);
+            throw new ApiError(aiResponse.status, `AI model API error: ${aiResponse.statusText}`);
         }
-        
+
         const prediction = await aiResponse.json();
-        
+
         return res
             .status(200)
             .json(new ApiResponse(200, { inputData: processedData, prediction }, "Crop yield prediction received successfully."));
-            
+
     } catch (error) {
-        console.error("Failed to get prediction from AI model:", error);
         throw new ApiError(500, `Failed to get prediction from AI model: ${error.message}`);
     }
 });
@@ -305,4 +292,4 @@ const getMarketData = asyncHandler(async (req, res) => {
     }
 });
 
-export { getCropPredictionData, getCropYieldPrediction, getMarketData };
+export { getCropPredictionData,getCropYieldPrediction, getMarketData };
